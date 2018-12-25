@@ -1,10 +1,9 @@
 (ns replikativ.crdt.simple-gset.impl
   (:require [replikativ.protocols :refer [POpBasedCRDT -downstream
-                                          PExternalValues -missing-commits -commit-value
+                                          PExternalValues -missing-commits
                                           PPullOp -pull]]
             [replikativ.crdt.simple-gset.core :refer [downstream]]
-            #?(:clj [superv.async :refer [go-try go-loop-try <?]]
-               :cljs [superv.async :as sasync])
+            #?(:clj [superv.async :refer [go-try go-loop-try <?]])
             #?(:clj [clojure.core.async :as async
                     :refer [>! timeout chan put! pub sub unsub close!]]
                :cljs [cljs.core.async :as async

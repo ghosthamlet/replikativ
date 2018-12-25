@@ -1,6 +1,6 @@
 (ns replikativ.crdt.ormap.impl
   (:require [replikativ.protocols :refer [POpBasedCRDT -downstream
-                                          PExternalValues -missing-commits -commit-value
+                                          PExternalValues -missing-commits
                                           PPullOp -pull]]
             [replikativ.crdt.ormap.core :refer [downstream]]
             [konserve.core :as k]
@@ -12,8 +12,7 @@
             [clojure.set :as set])
   #?(:cljs (:require-macros [superv.async :refer [go-try go-loop-try <?]])))
 
-(defn- all-commits
-  [ormap]
+(defn all-commits [ormap]
   (for [[_ uid->cid] (concat (:adds ormap) (:removals ormap))
         [_ cid] uid->cid]
     cid))
@@ -27,14 +26,12 @@
                  (if f
                    (recur (if (not (<? S (k/exists? store f)))
                             (conj not-in-store f) not-in-store) r)
-                            not-in-store))))
+                   not-in-store))))
 
 (extend-type replikativ.crdt.ORMap
   PExternalValues
   (-missing-commits [this S store out fetched-ch op]
     (missing-commits S store this op))
-  (-commit-value [this commit]
-    (select-keys commit #{:transactions :uid}))
   POpBasedCRDT
   (-handshake [this S] (into {} this))
   (-downstream [this op] (downstream this op)))

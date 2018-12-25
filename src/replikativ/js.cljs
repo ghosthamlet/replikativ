@@ -2,12 +2,20 @@
   "Experimental JavaScript API."
   (:require [replikativ.peer :as peer]
             [replikativ.stage :as stage]
-            [replikativ.crdt.cdvcs.stage :as cs]
-            [replikativ.crdt.cdvcs.realize :as real]
-            [konserve.js :as k]
+            [replikativ.crdt.lwwr.stage :as lwwr-stage]
+            [replikativ.crdt.ormap.stage :as ormap-stage]
+            [goog.net.WebSocket]
+            [goog.Uri]
+            [goog.events]
+            [replikativ.crdt.ormap.realize :as ormap-realize]
+            [replikativ.crdt.lwwr.realize :as lwwr-realize]
             [konserve.memory :as mem]
-            [cljs.core.async :refer [chan take!]]
-            [cljs.nodejs :as nodejs]))
+            [cljs.core.async :refer [chan take! <! >!]]
+            [superv.async :refer [S]]
+            [taoensso.timbre :as timbre]
+            [replikativ.crdt.lwwr.core :as lwwr]
+            [replikativ.crdt.ormap.core :as ormap])
+  (:require-macros [superv.async :refer [go-loop-try go-try]]))
 
 (defn on-node? []
   (and (exists? js/process)
@@ -15,59 +23,96 @@
        (exists? js/process.versions.node)
        true))
 
-(defn ^:export new_mem_store [cb]
-  (take! (mem/new-mem-store) cb))
+(defn- promise [ch]
+  (js/Promise.
+   (fn [resolve reject]
+     (try
+       (take! ch resolve)
+       (catch js/Error e (reject e))))))
 
-(defn ^:export client_peer [S store cb]
-  (take! (peer/client-peer S store (chan)) cb))
+(defn- promise-convert [ch]
+  (js/Promise.
+   (fn [resolve reject]
+     (try
+       (take! ch (fn [result] (resolve (clj->js result))))
+       (catch js/Error e (reject e))))))
 
-(defn ^:export connect [stage url cb]
-  (take! (stage/connect! stage url) cb))
 
-(defn ^:export create_stage [user peer cb]
-  (take! (stage/create-stage! user peer) cb))
+(defn ^:export newMemStore
+  []
+  (promise (mem/new-mem-store)))
 
-(defn- convert-crdt-map [crdt-map]
-  (->> (for [[u crdts] crdt-map
-             crdt crdts]
-         [u (uuid crdt)])
-       (reduce
-        (fn [m [u crdt]]
-          (update-in m [u]
-                     #(conj (or % #{}) crdt)))
-        {})))
+(defn ^:export clientPeer [store]
+  (promise (peer/client-peer S store (chan))))
 
-(defn ^:export subscribe_crdts [stage crdt-map cb]
-  (let [crdt-map (-> crdt-map js->clj convert-crdt-map)]
-    (take! (stage/subscribe-crdts! stage crdt-map) cb)))
+(defn ^:export connect
+  [stage url]
+  (promise (stage/connect! stage url)))
 
-(defn ^:export create_cdvcs [stage cb]
-  (take! (cs/create-cdvcs! stage) (fn [id] (cb (.toString id)))))
+(defn ^:export createStage [user peer]
+  (promise (stage/create-stage! user peer)))
 
-(defn ^:export transact [stage user crdt-id txs cb]
-  (take! (cs/transact! stage
-                      [user (uuid crdt-id)]
-                      (map vec txs))
-         cb))
+(defn ^:export createORMap [stage opts]
+  (let [opts (js->clj opts)]
+    (promise (ormap-stage/create-ormap! stage :id (get opts "id") :description (get opts "description")))))
 
-(defn ^:export head_value [stage eval-fns user cdvcs-id cb]
-  (let [store (get-in @stage [:volatile :store])
-        S (get-in @stage [:volatile :supervisor])]
-    (take! (real/head-value S store (js->clj eval-fns)
-                            (get-in @stage [user (uuid cdvcs-id) :state]))
-           cb)))
+(defn ^:export createLWWR [stage opts]
+  (let [opts (js->clj opts)]
+    (promise (lwwr-stage/create-lwwr! stage :id (get opts "id") :description (get opts "description")))))
 
-(defn ^:export -main [& args]
-  (.log js/console "Loading replikativ node code."))
+(defn ^:export setLWWR [stage user crdt-id register]
+  (promise (lwwr-stage/set-register! stage [user crdt-id] (js->clj register))))
 
-;; TODO not sufficient, goog.global needs to be set to this on startup before core.async
-(when ^boolean js/COMPILED
-  (set! js/goog.global js/global))
-(nodejs/enable-util-print!)
-(set! cljs.core/*main-cli-fn* -main)
-(set! (.-exports js/module) #js {:client_peer client_peer
-                                 :connect connect
-                                 :create_stage create_stage
-                                 :subscribe_crdts subscribe_crdts
-                                 :create_cdvcs create_cdvcs
-                                 :transact transact})
+(defn ^:export associateORMap
+  [stage user crdt-id tx-key txs]
+  (let [txs (js->clj txs)]
+    (promise (ormap-stage/assoc! stage
+                                 [user crdt-id]
+                                 tx-key
+                                 (mapv (comp js->clj vec) txs)))))
+
+
+(defn eval-fns->js [eval-fns]
+  (let [eval-fns (js->clj eval-fns)]
+    (->> (for [[k v] eval-fns]
+           [k (fn [S old params]
+                ;; TODO: check params if binary
+                (v S old (clj->js params)))])
+         (reduce (fn [m [k v]] (assoc m k v)) {}))))
+
+
+(defn ^:export streamORMap [stage user crdt-id stream-eval-fns target]
+  (ormap-realize/stream-into-identity! stage [user crdt-id] (eval-fns->js stream-eval-fns) target))
+
+(defn ^:export streamLWWR [stage user crdt-id cb]
+  (let [val-atom (atom nil)
+        _ (add-watch val-atom :watcher (fn [_ _ _ new-state]
+                                         (cb (clj->js new-state))))]
+    (lwwr-realize/stream-into-atom! stage [user crdt-id] val-atom)))
+
+(defn ^:export createUUID [s]
+  (cljs.core/uuid s))
+
+(defn ^:export toEdn [o] (js->clj o))
+
+(defn ^:export hashIt [o] (hasch.core/uuid o))
+
+(when on-node?
+  (when ^boolean js/COMPILED
+    (set! js/goog.global js/global)))
+
+(set!
+ (.-exports js/module)
+ #js {:newMemStore    newMemStore
+      :clientPeer     clientPeer
+      :createStage    createStage
+      :connect        connect
+      :createLWWR     createLWWR
+      :streamLWWR     streamLWWR
+      :setLWWR        setLWWR
+      :createORMap    createORMap
+      :streamORMap    streamORMap
+      :associateORMap associateORMap
+      :createUUID     cljs.core/uuid
+      :toEdn          cljs.core/js->clj
+      :hashIt         hasch.core/uuid})

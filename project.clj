@@ -1,19 +1,22 @@
-(defproject io.replikativ/replikativ "0.2.0-SNAPSHOT"
-  :description "A scalable distributive p2p system for confluent replicated data types."
+(defproject io.replikativ/replikativ "0.2.5-SNAPSHOT"
+  :description "An open, scalable and distributive infrastructure for a data-driven community of applications."
   :url "http://github.com/replikativ/replikativ"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :source-paths ["src"]
-  :dependencies [[org.clojure/clojure "1.8.0"]
-                 [org.clojure/clojurescript "1.8.51"]
+  :dependencies [[org.clojure/clojure "1.8.0" :scope "provided"]
+                 #_[org.clojure/clojure "1.9.0-alpha16" :scope "provided"]
+                 [org.clojure/clojurescript "1.9.542" :scope "provided"]
 
-                 [io.replikativ/superv.async "0.2.1-SNAPSHOT"]
-                 [io.replikativ/konserve "0.4.4-SNAPSHOT"]
+                 [io.replikativ/superv.async "0.2.9"]
+                 [io.replikativ/incognito "0.2.1"]
+                 [io.replikativ/konserve "0.4.9"]
 
-                 [io.replikativ/kabel "0.1.9-SNAPSHOT"]]
+                 [http-kit "2.2.0"]
+                 [com.cognitect/transit-cljs "0.8.239" :scope "provided"]
+                 [io.replikativ/kabel "0.2.2"]]
 
-  :profiles {:dev {:dependencies [[midje "1.8.2"]
-                                  [com.fzakaria/slf4j-timbre "0.3.2"]
+  :profiles {:dev {:dependencies [[com.fzakaria/slf4j-timbre "0.3.5"]
                                   [com.cemerick/piggieback "0.2.1"]]
                    :figwheel {:nrepl-port 7888
                               :nrepl-middleware ["cider.nrepl/cider-middleware"
@@ -21,8 +24,7 @@
                    :plugins [[lein-figwheel "0.5.8"]]}}
 
   :plugins [[lein-cljsbuild "1.1.4"]
-            [lein-codox "0.10.1"]
-            [lein-midje "3.2.1"]]
+            [lein-codox "0.10.1"]]
 
   :codox {:source-paths ["src"]
           :output-path "doc"}
@@ -49,23 +51,40 @@
      ;:assert false
      :compiler
      {:main replikativ.js
-      :output-to "target/nodejs/replikativ.js"
-      :output-dir "target/nodejs/"
+      :output-to "nodejs/replikativ.js"
+      :output-dir "nodejs/"
       ;:asset-path "out"
-      :source-map "target/nodejs/replikativ.js.map"
+      :source-map "nodejs/replikativ.js.map"
       :target :nodejs
       ;:elide-asserts true
       ;:pretty-print true
       :optimizations :simple
       }}
-    {:id "dev"
+    {:id "browser-js-simple"
      :source-paths ["src"]
      :compiler
-     {:output-to "resources/public/js/main.js"
-      :output-dir "resources/public/js/"
+     {:main replikativ.js
+      :output-to "resources/public/js/simple/main.js"
+      :output-dir "resources/public/js/simple/"
+      :source-map "resources/public/js/simple/main.js.map"
       :optimizations :simple
+      :pretty-print true}}
+    {:id "browser-js"
+     :source-paths ["src"]
+     :compiler
+     {:main replikativ.js
+      :output-to "resources/public/js/main.js"
+      :output-dir "resources/public/js/"
+      :optimizations :advanced
       :pretty-print true
-      :source-map true}}]}
+      :source-map true}}
+    {:id           "min"
+     :source-paths ["src"]
+     :compiler
+     {:main          replikativ.js
+      :output-to     "resources/public/js/replikativ.js"
+      :optimizations :simple
+      :pretty-print  true}}]}
 
   :documentation
   {:files {"index"

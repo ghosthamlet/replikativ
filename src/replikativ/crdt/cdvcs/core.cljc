@@ -4,13 +4,15 @@
   corresponding downstream operation for synchronisation."
   (:refer-clojure :exclude [merge])
   (:require [clojure.set :as set]
-            [replikativ.environ :refer [*id-fn* *date-fn* store-blob-trans-id store-blob-trans]]
+            [replikativ.environ :refer [*id-fn* *date-fn*
+                                        store-blob-trans-id store-blob-trans]]
             [replikativ.protocols :refer [PExternalValues]]
-            [kabel.platform-log :refer [debug info]]
+            #?(:clj [kabel.platform-log :refer [debug info]])
             [replikativ.crdt :refer [map->CDVCS]]
             [replikativ.crdt.utils :refer [extract-crdts]]
             [replikativ.crdt.cdvcs.meta :refer [consistent-graph? lowest-common-ancestors
-                                                remove-ancestors]]))
+                                                remove-ancestors]])
+  #?(:cljs (:require-macros [kabel.platform-log :refer [debug info]])))
 
 
 (defn new-cdvcs
@@ -118,7 +120,8 @@
 (defn pull
   "Pull all commits from remote-tip (only its ancestors)."
   ([cdvcs remote-state remote-tip] (pull cdvcs remote-state remote-tip false false))
-  ([{:keys [state] :as cdvcs} remote-state remote-tip allow-induced-conflict? rebase-transactions?]
+  ([{:keys [state] :as cdvcs} remote-state remote-tip
+    allow-induced-conflict? rebase-transactions?]
    (when (get-in state [:commit-graph remote-tip])
      (throw (ex-info "No pull necessary."
                      {:type :pull-unnecessary
@@ -153,13 +156,15 @@
                        {:type :multiple-heads
                         :state new-state
                         :heads (get-in new-state [:heads])})))
-     (debug {:event :pulling-lcas-from-cut :lcas lcas :visited-b visited-b :new-state new-state})
+     (debug {:event :pulling-lcas-from-cut :lcas lcas
+             :visited-b visited-b :new-state new-state})
      (assoc cdvcs
             :state (clojure.core/merge state new-state)
             :downstream {:crdt :cdvcs
                          :op {:method :pull
                               :version 1
-                              :commit-graph (select-keys (:commit-graph new-state) visited-b)
+                              :commit-graph (select-keys (:commit-graph new-state)
+                                                         visited-b)
                               :heads #{remote-tip}}}))))
 
 
@@ -196,8 +201,9 @@
                                        source-heads
                                        (:commit-graph remote-state)
                                        remote-heads)
-         new-graph (clojure.core/merge (:commit-graph state) (select-keys (:commit-graph remote-state)
-                                                                          (:visited-b lcas)))]
+         new-graph (clojure.core/merge (:commit-graph state)
+                                       (select-keys (:commit-graph remote-state)
+                                                    (:visited-b lcas)))]
      (debug {:event :merging-into :author author :id (:id state) :lcas lcas})
      (assoc-in (raw-commit (-> cdvcs
                                (assoc-in [:state :commit-graph] new-graph)

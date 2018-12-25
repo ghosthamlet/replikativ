@@ -10,15 +10,14 @@
             [replikativ.crdt.materialize :refer [ensure-crdt]]
             [replikativ.crdt.cdvcs.core :refer [multiple-heads?]]
             [replikativ.crdt.cdvcs.meta :as meta]
-            [kabel.platform-log :refer [debug info warn]]
-            #?(:clj [superv.async :refer [<? go-try]])
-            #?(:clj [superv.lab :refer [go-loop-super]])
+            #?(:clj [kabel.platform-log :refer [debug info warn]])
+            #?(:clj [superv.async :refer [<? go-try go-loop-super >?]])
             #?(:clj [clojure.core.async :as async
-                     :refer [>! timeout chan alt! put! sub unsub pub close!]]
+                     :refer [>! <! timeout chan alt! put! sub unsub pub close!]]
                :cljs [cljs.core.async :as async
-                      :refer [>! timeout chan put! sub unsub pub close!]]))
-  #?(:cljs (:require-macros [superv.async :refer [<? go-try]]
-                            [superv.lab :refer [go-loop-super]])))
+                      :refer [>! <! timeout chan put! sub unsub pub close!]]))
+  #?(:cljs (:require-macros [superv.async :refer [<? go-try go-loop-super >?]]
+                            [kabel.platform-log :refer [debug info warn]])))
 
 
 (defn commit-history
@@ -114,8 +113,32 @@ linearisation. Each commit occurs once, the first time it is found."
                 (drop offset history-b)
                 heads))))
 
-;; break stack overflow error in cljs compilation
-(defn stream-loop [S store pub-ch [u id] cdvcs applied-log eval-fn reset-fn ident]
+
+(defn stream-non-conflict [S applied-log commit-graph heads
+                           new-commit-graph store eval-fn ident
+                           applied-ch new-commits]
+  (go-try S
+    (when (zero? (count new-commit-graph))
+      (warn {:event :cannot-have-empty-pubs :pub pub
+             :new-commit-graph new-commit-graph}))
+    (when (> (count new-commit-graph) 1)
+      (info {:event :batch-update
+             :new-commit-count (count new-commit-graph)}))
+    (when (zero? (count new-commits))
+      (info {:event :no-new-commits
+             :heads heads
+             :new-commit-graph-count (count new-commit-graph)
+             :existing-count (count (select-keys commit-graph (keys new-commit-graph)))
+             :commit-graph-count (count commit-graph)}))
+    (<? S (real/reduce-commits S store eval-fn
+                               ident
+                               new-commits))
+    (when applied-log
+      (<? S (k/append store applied-log (set new-commits))))
+    (>? S applied-ch pub)))
+
+;; this is necessary to break stack overflow error in cljs compilation
+(defn stream-loop [S store pub-ch [u id] cdvcs applied-log applied-ch eval-fn reset-fn ident]
   (go-loop-super S
                  [{{{new-heads :heads
                      new-commit-graph :commit-graph :as op} :op
@@ -127,7 +150,7 @@ linearisation. Each commit occurs once, the first time it is found."
                             (<? S (k/reduce-log store applied-log set/union #{}))
                             #{})]
                  (when pub
-                   (debug {:event :streaming :id (:id pub)})
+                   (debug {:event :stream-into-cdvcs :id (:id pub)})
                    (let [{:keys [heads commit-graph] :as cdvcs} (-downstream cdvcs op)]
                      (cond (not (and (= user u)
                                      (= crdt-id id)))
@@ -136,39 +159,35 @@ linearisation. Each commit occurs once, the first time it is found."
                            ;; TODO complicated merged case, recreate whole value for now
                            (and (not (empty? (filter #(> (count %) 1) (vals new-commit-graph))))
                                 (= 1 (count heads)))
-                           (let [val (<? S (head-value S store eval-fn cdvcs))]
-                             (reset-fn ident val)
-                             (<? S (k/assoc-in store [applied-log] nil))
-                             (recur (<? S pub-ch) cdvcs (set (keys commit-graph))))
+                           (let [commits (commit-history commit-graph (first heads))]
+                             (info {:event :recreating-identity
+                                    :commit-count (count commits)})
+                             (reset-fn ident nil)
+                             (when applied-log
+                               (<? S (k/assoc-in store [applied-log] nil))
+                               (<? S (k/append store applied-log (set commits))))
+                             (<? S (real/reduce-commits S store eval-fn
+                                                        ident
+                                                        commits))
+                             (>? S applied-ch pub)
+                             (recur (<? S pub-ch) cdvcs (set commits)))
 
                            (= 1 (count heads))
                            (let [new-commits (filter (comp not applied)
                                                      (commit-history commit-graph (first heads)))]
-                             ;; causes stackoverflow in cljs compilation (!?!)
-                             (when (zero? (count new-commit-graph))
-                               (warn {:event :cannot-have-empty-pubs :pub pub
-                                      :new-commit-graph new-commit-graph}))
-                             (when (> (count new-commit-graph) 1)
-                               (info {:event :batch-update
-                                      :new-commit-count (count new-commit-graph)}))
-                             (when (zero? (count new-commits))
-                               (info {:event :no-new-commits
-                                      :heads heads
-                                      :new-commit-graph-count (count new-commit-graph)
-                                      :existing-count (count (select-keys commit-graph (keys new-commit-graph)))
-                                      :commit-graph-count (count commit-graph)}))
-                             (when applied-log
-                               (<? S (k/append store applied-log (set new-commits))))
-                             (<? S (real/reduce-commits S store eval-fn
-                                                        ident
-                                                        new-commits))
+                             ;; HACK this function is only factored out because of
+                             ;; a cljs compiler stackoverflow 
+                             ;; TODO (horrible argument list)
+                             (<? S (stream-non-conflict S applied-log commit-graph heads
+                                                        new-commit-graph store eval-fn ident
+                                                        applied-ch new-commits))
                              (recur (<? S pub-ch) cdvcs (set/union applied (set new-commits))))
 
                            :else
                            (do
                              (reset-fn ident (<? S (summarize-conflict S store eval-fn cdvcs)))
                              (<? S (k/assoc-in store [applied-log] nil))
-                             (recur (<? S pub-ch) cdvcs applied)))))))
+                             (recur (<? S pub-ch) cdvcs #{})))))))
 
 
 (defn stream-into-identity! [stage [u id] eval-fn ident
@@ -177,11 +196,12 @@ linearisation. Each commit occurs once, the first time it is found."
   (let [{{[p _] :chans
           :keys [store err-ch]
           S :supervisor} :volatile} @stage
-        pub-ch (chan 10000)]
+        pub-ch (chan 10000)
+        applied-ch (chan 10000)]
     (async/sub p :pub/downstream pub-ch)
     ;; stage is set up, now lets kick the update loop
     (go-try S
-     ;; trigger an update for us if the crdt is already on stage
+     ;; NOTE: trigger an update for us if the crdt is already on stage
      ;; this cdvcs version is as far or ahead of the stage publications
      ;; (no gap in publication chain)
      (let [cdvcs (<? S (ensure-crdt S store (<? S (new-mem-store)) [u id] :cdvcs))]
@@ -190,5 +210,6 @@ linearisation. Each commit occurs once, the first time it is found."
                                     :crdt :cdvcs
                                     :op (-handshake cdvcs S)}
                        :user u :crdt-id id}))
-       (stream-loop S store pub-ch [u id] cdvcs applied-log eval-fn reset-fn ident)))
-    pub-ch))
+       (stream-loop S store pub-ch [u id] cdvcs applied-log applied-ch eval-fn reset-fn ident)))
+    {:close-ch pub-ch
+     :applied-ch applied-ch}))

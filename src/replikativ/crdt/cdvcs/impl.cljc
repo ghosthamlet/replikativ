@@ -3,11 +3,10 @@
   (:require [clojure.set :as set]
             [replikativ.environ :refer [*id-fn* *date-fn* store-blob-trans-id]]
             [replikativ.protocols :refer [POpBasedCRDT -downstream
-                                          PExternalValues -missing-commits -commit-value
+                                          PExternalValues -missing-commits
                                           PPullOp -pull]]
-            [kabel.platform-log :refer [debug info error]]
-            #?(:clj [superv.async :refer [go-try go-loop-try <? <<?]])
-            #?(:clj [superv.lab :refer [go-for]])
+            #?(:clj [kabel.platform-log :refer [debug info error]])
+            #?(:clj [superv.async :refer [go-try go-loop-try <? <<? go-for]])
             [replikativ.crdt.cdvcs.core :refer [multiple-heads? pull]]
             [replikativ.crdt.cdvcs.meta :refer [downstream]]
             [konserve.core :as k]
@@ -15,8 +14,8 @@
                     :refer [>! timeout chan put! pub sub unsub close!]]
                :cljs [cljs.core.async :as async
                       :refer [>! timeout chan put! pub sub unsub close!]]))
-  #?(:cljs (:require-macros [superv.async :refer [go-try go-loop-try <? <<?]]
-                            [superv.lab :refer [go-for]])))
+  #?(:cljs (:require-macros [superv.async :refer [go-try go-loop-try <? <<? go-for]]
+                            [kabel.platform-log :refer [debug info error]])))
 
 
 ;; fetching related ops
@@ -120,9 +119,6 @@
   PExternalValues
   (-missing-commits [this S store out fetched-ch op]
     (missing-commits S store this op))
-  (-commit-value [this commit]
-    (select-keys commit #{:transactions :parents}))
-
   PPullOp
   (-pull [this S store atomic-pull-store hooks]
     (pull-cdvcs! S store atomic-pull-store hooks)))
